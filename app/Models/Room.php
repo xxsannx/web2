@@ -28,4 +28,10 @@ class Room extends Model
     {
         return $this->hasMany(Booking::class);
     }
+
+    // Accessor untuk tipe camping
+    public function getCampingTypeAttribute()
+    {
+        return $this->type . ' Camping';
+    }
 }

@@ -11,7 +11,7 @@ return new class extends Migration
         Schema::create('rooms', function (Blueprint $table) {
             $table->id();
             $table->string('name');
-            $table->string('type'); // Single, Double, Suite
+            $table->string('type'); // Standard, Family, Premium, Backpacker, Romance, Group
             $table->text('description');
             $table->decimal('price', 10, 2);
             $table->string('image');

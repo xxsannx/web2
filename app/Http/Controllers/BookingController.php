@@ -78,7 +78,7 @@ class BookingController extends Controller
 
         if ($booking->verifyOTP($request->otp)) {
             return redirect()->route('booking.success', $booking->id)
-                ->with('success', 'Verifikasi OTP berhasil!');
+                ->with('success', 'Verifikasi OTP berhasil! Selamat menikmati petualangan camping Anda!');
         }
 
         return back()->withErrors(['otp' => 'Kode OTP salah atau sudah kadaluarsa']);

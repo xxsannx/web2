@@ -30,7 +30,7 @@ class AuthController extends Controller
 
         Auth::login($user);
 
-        return redirect()->route('home')->with('success', 'Registrasi berhasil!');
+        return redirect()->route('home')->with('success', 'Registrasi berhasil! Selamat datang di Pineus Tilu!');
     }
 
     public function showLogin()
@@ -47,7 +47,7 @@ class AuthController extends Controller
 
         if (Auth::attempt($credentials)) {
             $request->session()->regenerate();
-            return redirect()->route('home')->with('success', 'Login berhasil!');
+            return redirect()->route('home')->with('success', 'Login berhasil! Selamat datang kembali di Pineus Tilu!');
         }
 
         return back()->withErrors([
@@ -60,6 +60,6 @@ class AuthController extends Controller
         Auth::logout();
         $request->session()->invalidate();
         $request->session()->regenerateToken();
-        return redirect()->route('login')->with('success', 'Logout berhasil!');
+        return redirect()->route('login')->with('success', 'Logout berhasil! Sampai jumpa di petualangan berikutnya!');
     }
 }
