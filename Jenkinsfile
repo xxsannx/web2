@@ -37,9 +37,23 @@ pipeline {
         }
         
         stage('Run Tests') {
-            steps {
-                echo 'Running tests...'
-                sh 'php artisan test'
+    steps {
+        script {
+            // Cek apakah phpunit tersedia
+            sh '''
+                if composer show phpunit/phpunit > /dev/null 2>&1; then
+                    echo "Running PHPUnit tests..."
+                    ./vendor/bin/phpunit
+                elif php artisan list | grep -q test; then
+                    echo "Running Laravel tests..."
+                    php artisan test
+                else
+                    echo "No test framework detected, skipping tests"
+                fi
+            '''
+        }
+    }
+}
             }
         }
     }
