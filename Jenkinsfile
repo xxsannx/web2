@@ -1,15 +1,22 @@
 pipeline {
     agent any
     
-    tools {
-        nodejs "nodejs" // Pastikan sudah dikonfigurasi di Jenkins
-    }
-    
     stages {
-        stage('Install Dependencies') {
+        stage('Setup Node.js') {
             steps {
-                echo 'Installing PHP dependencies...'
-                sh 'composer install --no-dev --optimize-autoloader'
+                script {
+                    sh '''
+                        # Install Node.js manually
+                        curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+                        sudo apt-get install -y nodejs
+                        
+                        # Verify installation
+                        echo "Node.js version:"
+                        node --version
+                        echo "npm version:"
+                        npm --version
+                    '''
+                }
             }
         }
         
@@ -21,38 +28,6 @@ pipeline {
             }
         }
         
-        stage('Setup Environment') {
-            steps {
-                echo 'Setting up environment...'
-                sh 'cp .env.example .env'
-                sh 'php artisan key:generate'
-            }
-        }
-        
-        stage('Run Tests') {
-            steps {
-                echo 'Running tests...'
-                sh 'php artisan test'
-            }
-        }
-        
-        stage('Deploy') {
-            steps {
-                echo 'Deploying application...'
-                // Tambahkan deploy steps di sini
-            }
-        }
-    }
-    
-    post {
-        always {
-            echo 'Pipeline completed!'
-        }
-        failure {
-            echo '❌ Pipeline failed!'
-        }
-        success {
-            echo '✅ Pipeline succeeded!'
-        }
+        // Stage lainnya...
     }
 }
