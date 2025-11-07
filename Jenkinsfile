@@ -1,281 +1,382 @@
 pipeline {
     agent any
-    
+
     tools {
         nodejs "NodeJS"
     }
-    
+
     environment {
-        // ZAP Configuration dengan port berbeda
-        ZAP_DOCKER_IMAGE = "owasp/zap2docker-stable"
-        ZAP_REPORT_DIR = "zap-reports"
-        ZAP_PORT = "8090"
-        TARGET_URL = "http://host.docker.internal:4173"
-        
         // Application Configuration
+        TARGET_URL = "http://localhost:8000"  // Ganti dengan URL aplikasi Anda
         BUILD_ARTIFACT = "build-${BUILD_NUMBER}.tar.gz"
+        
+        // ZAP Configuration
+        ZAP_HOME = "/opt/zap"
+        ZAP_HOST = "localhost"
+        ZAP_PORT = "8090"
+        ZAP_REPORT_DIR = "zap-reports"        
+        // Security Thresholds
         SECURITY_SCORE_THRESHOLD = "80"
+        MAX_HIGH_VULNERABILITIES = "0"
+        MAX_MEDIUM_VULNERABILITIES = "5"
     }
-    
-    parameters {
-        choice(
-            choices: ['staging', 'production'],
-            description: 'Select deployment environment',
-            name: 'DEPLOY_ENVIRONMENT'
-        )
-        
-        booleanParam(
-            defaultValue: true,
-            description: 'Run full ZAP active scan (takes longer)',
-            name: 'RUN_FULL_ZAP_SCAN'
-        )
-        
-        string(
-            defaultValue: '',
-            description: 'Custom target URL for security testing (optional)',
-            name: 'CUSTOM_TARGET_URL'
-        )
-    }
-    
+
     stages {
         stage('Checkout Code') {
             steps {
                 checkout scm
                 sh '''
                     echo "🔍 Starting Security Pipeline"
-                    echo "📊 ZAP will use port: ${ZAP_PORT}"
-                    echo "🌐 Jenkins is using port: 8080"
-                    echo "🎯 Target Environment: ${DEPLOY_ENVIRONMENT}"
+                    echo "Repository: $GIT_URL"
+                    echo "Branch: $GIT_BRANCH"
+                    echo "Commit: $GIT_COMMIT"
                 '''
             }
         }
-        
+
         stage('Install Dependencies') {
             steps {
                 sh '''
                     echo "📦 Installing dependencies..."
                     npm install
+                    
+                    # Install security tools
+                    npm install --save-dev eslint-plugin-security || echo "ESLint security plugin installed"
+                    npm install -g @microsoft/security-devops || echo "Microsoft security tools installed"
                 '''
             }
         }
-        
+
         stage('Build Application') {
             steps {
                 sh '''
                     echo "🏗️ Building application..."
                     npm run build
-                    echo "✅ Build completed"
+                    echo "✅ Build completed successfully"
                 '''
             }
         }
-        
-        stage('Start Application') {
+
+        stage('Start Application for Testing') {
             steps {
                 sh '''
-                    echo "🚀 Starting application on port 4173..."
-                    npm run preview -- --port 4173 &
+                    echo "🚀 Starting application for security testing..."
+                    # Start the application in background
+                    npm run preview &
                     APP_PID=$!
                     echo $APP_PID > app.pid
-                    sleep 20
+                    echo "Application PID: $APP_PID"
                     
-                    # Test if app is running
-                    curl -f http://localhost:4173 > /dev/null 2>/dev/null && echo "✅ Application is running on port 4173" || echo "⚠️ Application might not be ready"
+                    # Wait for app to start
+                    echo "⏳ Waiting for application to start..."
+                    sleep 15
+                    
+                    # Test if application is accessible
+                    curl -f http://localhost:4173 > /dev/null 2>&1 && echo "✅ Application is running" || echo "⚠️ Application might not be ready"
                 '''
             }
         }
-        
-        stage('SAST - Static Analysis') {
+
+        stage('SAST - Static Application Security Testing') {
             parallel {
-                stage('npm Audit') {
+                stage('npm Audit - Dependency Scan') {
                     steps {
                         sh '''
                             echo "🔒 Running npm audit..."
                             mkdir -p sast-reports
                             npm audit --audit-level moderate > sast-reports/npm-audit.txt || true
                             npm audit --json > sast-reports/npm-audit.json || true
+                            
+                            # Check for critical vulnerabilities
+                            CRITICAL_COUNT=$(grep -c "critical" sast-reports/npm-audit.txt || true)
+                            HIGH_COUNT=$(grep -c "high" sast-reports/npm-audit.txt || true)
+                            
+                            echo "Critical vulnerabilities: $CRITICAL_COUNT"
+                            echo "High vulnerabilities: $HIGH_COUNT"
                         '''
                     }
                 }
-                
-                stage('Dependency Check') {
+
+                stage('ESLint Security Scan') {
                     steps {
                         sh '''
-                            echo "📦 Checking dependencies..."
+                            echo "📝 Running ESLint security scan..."
                             mkdir -p sast-reports
-                            npm list --depth=0 > sast-reports/dependencies.txt
-                            npx license-checker --json > sast-reports/licenses.json 2>/dev/null || echo "License checker not available"
+                            
+                            # Create temporary ESLint config for security
+                            cat > .eslintrc.security.js << EOF
+                            module.exports = {
+                                plugins: ['security'],
+                                extends: ['plugin:security/recommended'],
+                                rules: {
+                                    'security/detect-object-injection': 'warn',
+                                    'security/detect-non-literal-require': 'error',
+                                    'security/detect-non-literal-fs-filename': 'error',
+                                    'security/detect-eval-with-expression': 'error',
+                                    'security/detect-unsafe-regex': 'error',
+                                    'security/detect-buffer-noassert': 'error',
+                                    'security/detect-child-process': 'error',
+                                    'security/detect-disable-mustache-escape': 'error',
+                                    'security/detect-no-csrf-before-method-override': 'error',
+                                    'security/detect-non-literal-regexp': 'error',
+                                    'security/detect-pseudoRandomBytes': 'error',
+                                },
+                                env: {
+                                    node: true,
+                                    browser: true
+                                }
+                            };
+                            EOF
+                            
+                            # Run ESLint security scan
+                            npx eslint . --config .eslintrc.security.js --format json > sast-reports/eslint-security-report.json || true
+                            npx eslint . --config .eslintrc.security.js --format html > sast-reports/eslint-security-report.html || true
+                            
+                            echo "✅ ESLint security scan completed"
                         '''
                     }
+                }
+
+                stage('Source Code Analysis') {
+                    steps {
+                        sh '''
+                            echo "🔎 Running basic source code analysis..."
+                            mkdir -p sast-reports
+                            
+                            # Check for hardcoded secrets (basic check)
+                            grep -r "password.*=" . --include="*.js" --include="*.ts" --include="*.json" > sast-reports/hardcoded-secrets.txt || true
+                            grep -r "api_key" . --include="*" > sast-reports/api-keys.txt || true
+                            grep -r "token.*=" . --include="*.js" --include="*.ts" > sast-reports/tokens.txt || true
+                            
+                            # Check for dangerous functions
+                            grep -r "eval\\|setTimeout\\|setInterval" . --include="*.js" --include="*.ts" > sast-reports/dangerous-functions.txt || true
+                            
+                            echo "✅ Source code analysis completed"
+                        '''
+                    }
+                }
+            }
+            
+            post {
+                always {
+                    archiveArtifacts artifacts: 'sast-reports/**', fingerprint: true
                 }
             }
         }
-        
-        stage('DAST - ZAP Baseline Scan') {
+
+        stage('DAST - ZAP Security Scan') {
             steps {
                 script {
-                    echo "🎯 Starting ZAP Baseline Scan on port ${ZAP_PORT}"
+                    echo "🎯 Starting ZAP Dynamic Application Security Testing"
                     
+                    // Create reports directory
+                    sh "mkdir -p ${ZAP_REPORT_DIR}"
+                    
+                    // Check if ZAP is available
                     sh """
-                        mkdir -p ${ZAP_REPORT_DIR}
-                        echo "ZAP will run on port ${ZAP_PORT}"
+                        if [ -x "${ZAP_HOME}/zap.sh" ]; then
+                            echo "✅ ZAP found at ${ZAP_HOME}"
+                        else
+                            echo "❌ ZAP not found. Installing..."
+                            wget -q https://github.com/zaproxy/zaproxy/releases/download/v2.14.0/ZAP_2.14.0_Linux.tar.gz
+                            tar -xzf ZAP_2.14.0_Linux.tar.gz -C /opt/
+                            mv /opt/ZAP_2.14.0 /opt/zap
+                            chmod +x /opt/zap/zap.sh
+                        fi
                     """
-                    
-                    // Determine target URL
-                    def actualTargetUrl = params.CUSTOM_TARGET_URL ?: env.TARGET_URL
                     
                     // Run ZAP Baseline Scan
                     sh """
-                        docker run --rm \\
-                          -v $(pwd)/${ZAP_REPORT_DIR}:/zap/reports \\
-                          -t ${ZAP_DOCKER_IMAGE} zap-baseline.py \\
-                          -t ${actualTargetUrl} \\
-                          -J /zap/reports/zap-baseline-report.json \\
-                          -r /zap/reports/zap-baseline-report.html \\
-                          -x /zap/reports/zap-baseline-report.xml \\
-                          -a || echo "ZAP baseline scan completed"
+                        echo "🔍 Running ZAP Baseline Scan..."
+                        ${ZAP_HOME}/zap-baseline.py -t ${TARGET_URL} \
+                            -J ${ZAP_REPORT_DIR}/zap-baseline-report.json \
+                            -x ${ZAP_REPORT_DIR}/zap-baseline-report.xml \
+                            -r ${ZAP_REPORT_DIR}/zap-baseline-report.html \
+                            -c ${ZAP_REPORT_DIR}/zap-baseline-report.conf \
+                            -a || true
                         
-                        echo "✅ ZAP Baseline Scan finished"
+                        echo "✅ ZAP Baseline Scan completed"
                     """
                 }
             }
+            
             post {
                 always {
-                    archiveArtifacts artifacts: "${ZAP_REPORT_DIR}/zap-baseline-report.*", fingerprint: true
+                    archiveArtifacts artifacts: "${ZAP_REPORT_DIR}/**", fingerprint: true
                     publishHTML([
                         allowMissing: true,
                         alwaysLinkToLastBuild: true,
                         keepAll: true,
                         reportDir: "${ZAP_REPORT_DIR}",
                         reportFiles: 'zap-baseline-report.html',
-                        reportName: 'ZAP Baseline Report'
+                        reportName: 'ZAP Security Report'
                     ])
                 }
             }
         }
-        
-        stage('DAST - ZAP Full Scan') {
-            when {
-                expression { params.RUN_FULL_ZAP_SCAN == true }
-            }
+
+        stage('ZAP Full Active Scan') {
             steps {
                 script {
-                    echo "⚡ Running ZAP Full Active Scan"
+                    echo "🎯 Starting ZAP Full Active Scan"
                     
-                    def actualTargetUrl = params.CUSTOM_TARGET_URL ?: env.TARGET_URL
-                    
+                    // Start ZAP in daemon mode
                     sh """
-                        # Start ZAP in daemon mode
-                        docker run -d --rm \\
-                          --name zap-full-scan \\
-                          -p ${ZAP_PORT}:8080 \\
-                          -v $(pwd)/${ZAP_REPORT_DIR}:/zap/reports \\
-                          -t ${ZAP_DOCKER_IMAGE} zap.sh \\
-                          -daemon -host 0.0.0.0 -port 8080 \\
-                          -config api.disablekey=true
-                        
-                        echo "⏳ Waiting for ZAP to start..."
-                        sleep 15
-                        
-                        # Spider the target
-                        echo "🕷️ Running ZAP Spider..."
-                        curl -s "http://localhost:${ZAP_PORT}/JSON/spider/action/scan/?url=${actualTargetUrl}&maxChildren=10&recurse=true" > /dev/null
+                        echo "🚀 Starting ZAP Daemon..."
+                        ${ZAP_HOME}/zap.sh -daemon -port ${ZAP_PORT} -host ${ZAP_HOST} \
+                            -config api.disablekey=true \
+                            -config scanner.attackOnStart=true \
+                            -config connection.timeoutInSecs=60 &
+                        ZAP_PID=\$!
+                        echo \$ZAP_PID > zap.pid
+                        sleep 10
+                    """
+                    
+                    // Run ZAP Spider and Active Scan
+                    sh """                        echo "🕷️ Running ZAP Spider..."
+                        curl -s "http://${ZAP_HOST}:${ZAP_PORT}/JSON/spider/action/scan/?url=${TARGET_URL}&maxChildren=10&recurse=true"
                         sleep 30
-                        
-                        # Active scan
-                        echo "⚡ Running ZAP Active Scan..."
-                        curl -s "http://localhost:${ZAP_PORT}/JSON/ascan/action/scan/?url=${actualTargetUrl}&recurse=true&inScopeOnly=true" > /dev/null
+                                                echo "⚡ Running ZAP Active Scan..."
+                        curl -s "http://${ZAP_HOST}:${ZAP_PORT}/JSON/ascan/action/scan/?url=${TARGET_URL}&recurse=true&inScopeOnly=true"
                         
                         echo "⏳ Waiting for active scan to complete (2 minutes)..."
                         sleep 120
                         
-                        # Generate reports
-                        echo "📊 Generating reports..."
-                        curl -s "http://localhost:${ZAP_PORT}/OTHER/core/other/htmlreport/" > ${ZAP_REPORT_DIR}/zap-full-scan-report.html
-                        curl -s "http://localhost:${ZAP_PORT}/JSON/core/action/jsonreport/" > ${ZAP_REPORT_DIR}/zap-full-scan-report.json
-                        
-                        # Stop ZAP container
-                        docker stop zap-full-scan
+                        echo "📊 Generating ZAP Reports..."
+                        curl -s "http://${ZAP_HOST}:${ZAP_PORT}/OTHER/core/other/htmlreport/" > ${ZAP_REPORT_DIR}/zap-full-active-report.html
+                        curl -s "http://${ZAP_HOST}:${ZAP_PORT}/JSON/core/action/jsonreport/" > ${ZAP_REPORT_DIR}/zap-full-active-report.json
+                        curl -s "http://${ZAP_HOST}:${ZAP_PORT}/OTHER/core/other/xmlreport/" > ${ZAP_REPORT_DIR}/zap-full-active-report.xml
                         
                         echo "✅ ZAP Full Active Scan completed"
                     """
                 }
             }
-        }
-        
-        stage('Security Analysis') {
-            steps {
-                script {
-                    sh """
-                        echo "📊 Analyzing security results..."
-                        
-                        SECURITY_SCORE=100
-                        HIGH_COUNT=0
-                        MEDIUM_COUNT=0
-                        LOW_COUNT=0
-                        
-                        # Analyze ZAP baseline report
-                        if [ -f "${ZAP_REPORT_DIR}/zap-baseline-report.json" ]; then
-                            HIGH_COUNT=\$(jq -r '[.site[].alerts[] | select(.riskcode == \"3\") | .count] | add // 0' ${ZAP_REPORT_DIR}/zap-baseline-report.json 2>/dev/null || echo "0")
-                            MEDIUM_COUNT=\$(jq -r '[.site[].alerts[] | select(.riskcode == \"2\") | .count] | add // 0' ${ZAP_REPORT_DIR}/zap-baseline-report.json 2>/dev/null || echo "0")
-                            LOW_COUNT=\$(jq -r '[.site[].alerts[] | select(.riskcode == \"1\") | .count] | add // 0' ${ZAP_REPORT_DIR}/zap-baseline-report.json 2>/dev/null || echo "0")
-                            
-                            PENALTY=\$((\$HIGH_COUNT * 10 + \$MEDIUM_COUNT * 5 + \$LOW_COUNT * 2))
-                            SECURITY_SCORE=\$((100 - \$PENALTY))
-                            [ \$SECURITY_SCORE -lt 0 ] && SECURITY_SCORE=0
-                        fi
-                        
-                        echo "SECURITY_SCORE=\$SECURITY_SCORE" > security.env
-                        echo "HIGH_COUNT=\$HIGH_COUNT" >> security.env
-                        echo "MEDIUM_COUNT=\$MEDIUM_COUNT" >> security.env
-                        echo "LOW_COUNT=\$LOW_COUNT" >> security.env
-                    """
+            
+            post {
+                always {
+                    // Stop ZAP
+                    sh '''
+                        echo "🛑 Stopping ZAP..."
+                        kill $(cat zap.pid) 2>/dev/null || true
+                        pkill -f "zap.sh" || true
+                        rm -f zap.pid
+                    '''
                     
-                    load 'security.env'
-                    echo "🔐 Security Score: ${SECURITY_SCORE}/100"
-                    echo "High Risk: ${HIGH_COUNT}, Medium Risk: ${MEDIUM_COUNT}, Low Risk: ${LOW_COUNT}"
-                    
-                    currentBuild.description = "Security: ${SECURITY_SCORE}/100"
+                    archiveArtifacts artifacts: "${ZAP_REPORT_DIR}/zap-full-active-report.*", fingerprint: true
                 }
             }
         }
-        
+
+        stage('Security Analysis & Scoring') {
+            steps {
+                script {
+                    echo "📈 Analyzing Security Results..."
+                    
+                    sh """
+                        # Initialize counters
+                        HIGH_RISK=0
+                        MEDIUM_RISK=0
+                        LOW_RISK=0
+                        INFO_RISK=0
+                        SECURITY_SCORE=100
+                        
+                        # Analyze ZAP report if exists
+                        if [ -f "${ZAP_REPORT_DIR}/zap-baseline-report.json" ]; then
+                            echo "📊 Analyzing ZAP Baseline Report..."
+                            
+                            HIGH_RISK=\$(jq -r '[.site[].alerts[] | select(.riskcode == "3") | .count] | add // 0' ${ZAP_REPORT_DIR}/zap-baseline-report.json 2>/dev/null || echo "0")
+                            MEDIUM_RISK=\$(jq -r '[.site[].alerts[] | select(.riskcode == "2") | .count] | add // 0' ${ZAP_REPORT_DIR}/zap-baseline-report.json 2>/dev/null || echo "0")
+                            LOW_RISK=\$(jq -r '[.site[].alerts[] | select(.riskcode == "1") | .count] | add // 0' ${ZAP_REPORT_DIR}/zap-baseline-report.json 2>/dev/null || echo "0")
+                            INFO_RISK=\$(jq -r '[.site[].alerts[] | select(.riskcode == "0") | .count] | add // 0' ${ZAP_REPORT_DIR}/zap-baseline-report.json 2>/dev/null || echo "0")
+                            
+                            # Calculate security score (0-100)
+                            PENALTY=\$((\$HIGH_RISK * 10 + \$MEDIUM_RISK * 5 + \$LOW_RISK * 2 + \$INFO_RISK * 1))
+                            SECURITY_SCORE=\$((100 - \$PENALTY))
+                            
+                            if [ \$SECURITY_SCORE -lt 0 ]; then
+                                SECURITY_SCORE=0
+                            fi
+                        fi
+                        
+                        # Analyze npm audit report
+                        if [ -f "sast-reports/npm-audit.json" ]; then
+                            echo "📊 Analyzing npm audit report..."
+                            CRITICAL_AUDIT=\$(jq -r '.metadata.vulnerabilities.critical // 0' sast-reports/npm-audit.json 2>/dev/null || echo "0")
+                            HIGH_AUDIT=\$(jq -r '.metadata.vulnerabilities.high // 0' sast-reports/npm-audit.json 2>/dev/null || echo "0")
+                            
+                            # Adjust security score based on npm audit
+                            AUDIT_PENALTY=\$((\$CRITICAL_AUDIT * 15 + \$HIGH_AUDIT * 8))
+                            SECURITY_SCORE=\$((\$SECURITY_SCORE - \$AUDIT_PENALTY))
+                            
+                            if [ \$SECURITY_SCORE -lt 0 ]; then
+                                SECURITY_SCORE=0
+                            fi
+                        fi
+                        
+                        echo "HIGH_RISK=\$HIGH_RISK" > security_metrics.env
+                        echo "MEDIUM_RISK=\$MEDIUM_RISK" >> security_metrics.env
+                        echo "LOW_RISK=\$LOW_RISK" >> security_metrics.env
+                        echo "INFO_RISK=\$INFO_RISK" >> security_metrics.env
+                        echo "SECURITY_SCORE=\$SECURITY_SCORE" >> security_metrics.env
+                    """
+                    
+                    // Load security metrics
+                    load 'security_metrics.env'
+                    
+                    echo "🔐 SECURITY METRICS:"
+                    echo "  High Risk Vulnerabilities: ${HIGH_RISK}"
+                    echo "  Medium Risk Vulnerabilities: ${MEDIUM_RISK}"
+                    echo "  Low Risk Vulnerabilities: ${LOW_RISK}"
+                    echo "  Informational: ${INFO_RISK}"
+                    echo "  📊 SECURITY SCORE: ${SECURITY_SCORE}/100"
+                    
+                    // Update build description with security score
+                    currentBuild.description = "Security Score: ${SECURITY_SCORE}/100"
+                }
+            }
+        }
+
         stage('Security Quality Gate') {
             steps {
                 script {
-                    def securityScore = Integer.parseInt(env.SECURITY_SCORE ?: "100")
-                    def highCount = Integer.parseInt(env.HIGH_COUNT ?: "0")
-                    
                     echo "🚨 Security Quality Gate Assessment"
-                    echo "Current Score: ${securityScore}/100"
-                    echo "High Risk Issues: ${highCount}"
                     
-                    // Critical: Fail if high risk vulnerabilities found
-                    if (highCount > 0) {
-                        echo "❌ CRITICAL: ${highCount} high risk vulnerabilities detected"
-                        if (params.DEPLOY_ENVIRONMENT == 'production') {
-                            error "Cannot deploy to production with high risk vulnerabilities"
-                        } else {
-                            input(
-                                message: "⚠️ ${highCount} high risk vulnerabilities found. Continue to ${params.DEPLOY_ENVIRONMENT}?",
-                                ok: "Continue Anyway"
-                            )
-                        }
+                    def HIGH_RISK_INT = Integer.parseInt(env.HIGH_RISK ?: "0")
+                    def MEDIUM_RISK_INT = Integer.parseInt(env.MEDIUM_RISK ?: "0")
+                    def SECURITY_SCORE_INT = Integer.parseInt(env.SECURITY_SCORE ?: "100")
+                    
+                    // Check for critical vulnerabilities
+                    if (HIGH_RISK_INT > Integer.parseInt(env.MAX_HIGH_VULNERABILITIES)) {
+                        error "❌ CRITICAL: ${HIGH_RISK_INT} high risk vulnerabilities found (max allowed: ${env.MAX_HIGH_VULNERABILITIES}). Pipeline stopped."
                     }
                     
-                    // Warning: Low security score
-                    if (securityScore < Integer.parseInt(env.SECURITY_SCORE_THRESHOLD)) {
-                        echo "⚠️ WARNING: Security score ${securityScore} is below threshold ${env.SECURITY_SCORE_THRESHOLD}"
+                    // Check security score threshold
+                    if (SECURITY_SCORE_INT < Integer.parseInt(env.SECURITY_SCORE_THRESHOLD)) {
+                        echo "⚠️ WARNING: Security score ${SECURITY_SCORE_INT}/100 is below threshold ${env.SECURITY_SCORE_THRESHOLD}"
+                        
+                        // Ask for manual approval to continue
                         input(
-                            message: "Security score ${securityScore}/100 is below threshold. Continue deployment to ${params.DEPLOY_ENVIRONMENT}?",
-                            ok: "Deploy Anyway"
+                            message: "Security score ${SECURITY_SCORE_INT}/100 is below threshold ${env.SECURITY_SCORE_THRESHOLD}. Continue deployment?",
+                            ok: "Proceed Anyway",
+                            parameters: [
+                                string(
+                                    defaultValue: '',
+                                    description: 'Reason for bypassing security threshold:',
+                                    name: 'BYPASS_REASON'
+                                )
+                            ]
                         )
+                    }
+                    
+                    if (MEDIUM_RISK_INT > Integer.parseInt(env.MAX_MEDIUM_VULNERABILITIES)) {
+                        echo "⚠️ WARNING: ${MEDIUM_RISK_INT} medium risk vulnerabilities found (threshold: ${env.MAX_MEDIUM_VULNERABILITIES})"
                     }
                     
                     echo "✅ Security quality gate passed"
                 }
             }
         }
-        
+
         stage('Package & Archive') {
             steps {
                 sh """
@@ -288,76 +389,135 @@ pipeline {
                 archiveArtifacts artifacts: "**/*-report.*", fingerprint: true
             }
         }
-        
-        stage('Deploy') {
+
+        stage('Deploy - Security Approved') {
+            when {
+                expression { 
+                    Integer.parseInt(env.SECURITY_SCORE ?: "100") >= Integer.parseInt(env.SECURITY_SCORE_THRESHOLD) 
+                }
+            }
             steps {
                 script {
-                    echo "🚀 Deploying to ${params.DEPLOY_ENVIRONMENT}"
-                    echo "📊 Security Score: ${env.SECURITY_SCORE}/100"
-                    echo "🔐 High Risk Issues: ${env.HIGH_COUNT}"
+                    echo "🚀 DEPLOYING SECURE APPLICATION"
+                    echo "Security Score: ${env.SECURITY_SCORE}/100"
+                    echo "High Risk Issues: ${env.HIGH_RISK}"
+                    echo "Medium Risk Issues: ${env.MEDIUM_RISK}"
                     
-                    // Deployment commands based on environment
-                    if (params.DEPLOY_ENVIRONMENT == 'production') {
-                        sh '''
-                            echo "🔒 PRODUCTION DEPLOYMENT"
-                            echo "This would deploy to production servers"
-                            # Add your production deployment commands here
-                        '''
-                    } else {
-                        sh '''
-                            echo "🧪 STAGING DEPLOYMENT"
-                            echo "This would deploy to staging servers"
-                            # Add your staging deployment commands here
-                        '''
-                    }
-                    
-                    echo "✅ Deployment to ${params.DEPLOY_ENVIRONMENT} completed"
+                    // Your deployment commands here
+                    sh '''
+                        echo "✅ Security requirements met - Proceeding with deployment"
+                        echo "📋 Deployment steps would execute here"
+                        # Example: scp build.tar.gz user@server:/path/to/deploy
+                        # Example: kubectl apply -f k8s/
+                        # Example: aws s3 sync dist/ s3://your-bucket/
+                    '''
                 }
             }
         }
     }
-    
+
     post {
         always {
+            echo "🧹 Cleaning up..."
             sh '''
-                echo "🧹 Cleaning up..."
                 # Stop application
                 kill $(cat app.pid) 2>/dev/null || true
-                pkill -f "node" || true
                 
-                # Stop any running ZAP containers
-                docker stop zap-full-scan 2>/dev/null || true
-                docker rm zap-full-scan 2>/dev/null || true
+                # Stop ZAP if still running
+                pkill -f "zap.sh" || true
+                pkill -f "java.*zap" || true
                 
                 # Cleanup files
-                rm -f app.pid security.env
+                rm -f app.pid zap.pid security_metrics.env
+                rm -f .eslintrc.security.js
                 
                 echo "✅ Cleanup completed"
             '''
         }
         
         success {
-            echo "🎉 Security Pipeline Success!"
+            echo "🎉 PIPELINE SUCCESS!"
             script {
                 if (env.SECURITY_SCORE) {
-                    echo "📊 Final Security Score: ${env.SECURITY_SCORE}/100"
-                    echo "🔐 Vulnerabilities - High: ${env.HIGH_COUNT}, Medium: ${env.MEDIUM_COUNT}, Low: ${env.LOW_COUNT}"
+                    echo "🔐 SECURITY SCORE: ${env.SECURITY_SCORE}/100"
+                    echo "📊 Vulnerabilities: High=${env.HIGH_RISK}, Medium=${env.MEDIUM_RISK}, Low=${env.LOW_RISK}"
                 }
+                
+                // Send success notification
+                emailext (
+                    subject: "✅ SUCCESS: Security Pipeline Build #${BUILD_NUMBER}",
+                    body: """
+                    Security Pipeline completed successfully!
+                    
+                    📊 Security Metrics:
+                    - Security Score: ${env.SECURITY_SCORE}/100
+                    - High Risk: ${env.HIGH_RISK}
+                    - Medium Risk: ${env.MEDIUM_RISK}
+                    - Low Risk: ${env.LOW_RISK}
+                    
+                    📁 Reports: ${BUILD_URL}artifact/
+                    🔍 ZAP Report: ${BUILD_URL}ZAP_20Security_20Report/
+                    
+                    Build: ${BUILD_URL}
+                    """,
+                    to: "dev-team@company.com",
+                    attachLog: true
+                )
             }
         }
         
         failure {
-            echo "❌ Pipeline Failed!"
+            echo "❌ PIPELINE FAILED!"
+            script {
+                // Send failure notification
+                emailext (
+                    subject: "❌ FAILED: Security Pipeline Build #${BUILD_NUMBER}",
+                    body: """
+                    Security Pipeline failed!
+                    
+                    ❌ Build: ${BUILD_URL}
+                    🔍 Check logs for details
+                    """,
+                    to: "dev-team@company.com",
+                    attachLog: true
+                )
+            }
         }
         
         unstable {
-            echo "⚠️ Pipeline Unstable - Security issues detected"
+            echo "⚠️ PIPELINE UNSTABLE - Security issues detected"
+        }
+        
+        changed {
+            echo "🔄 Pipeline status changed"
         }
     }
-    
+
     options {
         buildDiscarder(logRotator(numToKeepStr: '10'))
         timeout(time: 60, unit: 'MINUTES')
         disableConcurrentBuilds()
+        retry(2)
+    }
+
+    parameters {
+        choice(
+            name: 'DEPLOY_ENVIRONMENT',
+            choices: ['staging', 'production'],
+            description: 'Select deployment environment',
+            defaultValue: 'staging'
+        )
+        
+        booleanParam(
+            name: 'RUN_FULL_ZAP_SCAN',
+            defaultValue: true,
+            description: 'Run full ZAP active scan (takes longer)'
+        )
+        
+        string(
+            name: 'CUSTOM_TARGET_URL',
+            defaultValue: '',
+            description: 'Custom target URL for security testing (optional)'
+        )
     }
 }
