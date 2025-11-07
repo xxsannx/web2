@@ -42,20 +42,28 @@ pipeline {
             }
         }
 
-        stage('Deploy') {
+        stage('Deploy to Server') {
             steps {
-                echo 'Deploying Laravel application...'
-                // Ganti dengan deployment strategy Anda
+                echo 'Deploying to production server...'
+            script {
+                // Untuk deployment ke server via SSH
+                sshagent(['your-ssh-credentials-id']) {
                 sh '''
-                    mkdir -p /var/www/laravel-app
-                    cp -r * /var/www/laravel-app/
-                    chmod -R 755 /var/www/laravel-app/storage
-                    chmod -R 755 /var/www/laravel-app/bootstrap/cache
-                    echo "Application deployed successfully!"
+                    ssh user@your-server.com '
+                        cd /var/www/laravel-app &&
+                        git pull origin main &&
+                        composer install --no-dev --optimize-autoloader &&
+                        php artisan migrate --force &&
+                        php artisan config:cache &&
+                        php artisan route:cache &&
+                        php artisan view:cache &&
+                        sudo systemctl reload apache2
+                    '
                 '''
             }
         }
     }
+}
 
     post {
         success {
