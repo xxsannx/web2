@@ -30,4 +30,8 @@ Route::middleware('auth')->group(function () {
     Route::post('/booking/verify-otp/{id}', [BookingController::class, 'verifyOtp'])->name('booking.verifyOtp');
     Route::get('/booking/success/{id}', [BookingController::class, 'success'])->name('booking.success');
     Route::get('/my-bookings', [BookingController::class, 'myBookings'])->name('booking.myBookings');
+
+
+    //metrics endpoint
+    Route::get('/metrics', [App\Http\Controllers\MetricsController::class, 'metrics']);
 });
