@@ -4,7 +4,7 @@ pipeline {
     environment {
         // Ensure ZAP_HOME is set to the correct ZAP installation directory
         ZAP_HOME = '/opt/zap'  // Update the path if necessary
-        TARGET_URL = "http://127.0.0.1:8000"  // Update to the target URL of your application
+        TARGET_URL = "http://127.0.0.1:8000"  // Update with the target URL of your Laravel application
         BUILD_ARTIFACT = "build-${BUILD_NUMBER}.tar.gz"
         
         // ZAP Report Directory
@@ -56,8 +56,8 @@ pipeline {
             steps {
                 sh '''
                     echo "🚀 Starting application for security testing..."
-                    # Start the application in background
-                    npm run preview &
+                    # Start the application in the background
+                    php artisan serve --host=127.0.0.1 --port=8000 &
                     APP_PID=$!
                     echo $APP_PID > app.pid
                     echo "Application PID: $APP_PID"
@@ -67,7 +67,7 @@ pipeline {
                     sleep 15
                     
                     # Test if application is accessible
-                    curl -f http://127.0.0.1:8000/ > /dev/null 2>&1 && echo "✅ Application is running" || echo "⚠️ Application might not be ready"
+                    curl -f http://127.0.0.1:8000/home > /dev/null 2>&1 && echo "✅ Application is running" || echo "⚠️ Application might not be ready"
                 '''
             }
         }
@@ -338,15 +338,14 @@ pipeline {
 
         stage('Package & Archive') {
             steps {
-            sh """
-                echo "📦 Packaging application..."
-                mkdir -p build
-                tar -czf build/${BUILD_ARTIFACT} --exclude='node_modules' --exclude='.git' --exclude='build' .
-                echo "✅ Package created: build/${BUILD_ARTIFACT}"
-            """
-        
-            archiveArtifacts artifacts: "build/*.tar.gz", fingerprint: true
-            archiveArtifacts artifacts: "**/*-report.*", fingerprint: true
+                sh """
+                    echo "📦 Packaging application..."
+                    tar -czf ${BUILD_ARTIFACT} --exclude='node_modules' --exclude='.git' .
+                    echo "✅ Package created: ${BUILD_ARTIFACT}"
+                """
+                
+                archiveArtifacts artifacts: "*.tar.gz", fingerprint: true
+                archiveArtifacts artifacts: "**/*-report.*", fingerprint: true
             }
         }
 
