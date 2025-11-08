@@ -338,14 +338,14 @@ pipeline {
 
         stage('Package & Archive') {
             steps {
-                sh """
-                    echo "📦 Packaging application..."
-                    tar -czf ${BUILD_ARTIFACT} --exclude='node_modules' --exclude='.git' .
-                    echo "✅ Package created: ${BUILD_ARTIFACT}"
-                """
-                
-                archiveArtifacts artifacts: "*.tar.gz", fingerprint: true
-                archiveArtifacts artifacts: "**/*-report.*", fingerprint: true
+            sh """
+                echo "📦 Packaging application..."
+                tar -czf ${BUILD_ARTIFACT} --exclude='node_modules' --exclude='.git' --exclude='${BUILD_ARTIFACT}' .
+            echo "✅ Package created: ${BUILD_ARTIFACT}"
+            """
+        
+            archiveArtifacts artifacts: "*.tar.gz", fingerprint: true
+            archiveArtifacts artifacts: "**/*-report.*", fingerprint: true
             }
         }
 
