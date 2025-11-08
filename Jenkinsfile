@@ -4,7 +4,7 @@ pipeline {
     environment {
         // Ensure ZAP_HOME is set to the correct ZAP installation directory
         ZAP_HOME = '/opt/zap'  // Update the path if necessary
-        TARGET_URL = "http://localhost:8000"  // Update to the target URL of your application
+        TARGET_URL = "http://127.0.0.1:8000"  // Update to the target URL of your application
         BUILD_ARTIFACT = "build-${BUILD_NUMBER}.tar.gz"
         
         // ZAP Report Directory
@@ -67,7 +67,7 @@ pipeline {
                     sleep 15
                     
                     # Test if application is accessible
-                    curl -f http://localhost:4173 > /dev/null 2>&1 && echo "✅ Application is running" || echo "⚠️ Application might not be ready"
+                    curl -f http://127.0.0.1:8000/ > /dev/null 2>&1 && echo "✅ Application is running" || echo "⚠️ Application might not be ready"
                 '''
             }
         }
