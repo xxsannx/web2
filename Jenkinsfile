@@ -340,11 +340,12 @@ pipeline {
             steps {
             sh """
                 echo "📦 Packaging application..."
-                tar -czf ${BUILD_ARTIFACT} --exclude='node_modules' --exclude='.git' --exclude='${BUILD_ARTIFACT}' .
-            echo "✅ Package created: ${BUILD_ARTIFACT}"
+                mkdir -p build
+                tar -czf build/${BUILD_ARTIFACT} --exclude='node_modules' --exclude='.git' --exclude='build' .
+                echo "✅ Package created: build/${BUILD_ARTIFACT}"
             """
         
-            archiveArtifacts artifacts: "*.tar.gz", fingerprint: true
+            archiveArtifacts artifacts: "build/*.tar.gz", fingerprint: true
             archiveArtifacts artifacts: "**/*-report.*", fingerprint: true
             }
         }
@@ -419,7 +420,7 @@ pipeline {
                     
                     Build: ${BUILD_URL}
                     """,
-                    to: "zainul.ariffinihsan@gmail.com",
+                    to: "dev-team@company.com",
                     attachLog: true
                 )
             }
