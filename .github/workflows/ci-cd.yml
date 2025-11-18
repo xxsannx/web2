@@ -1,4 +1,4 @@
-name: Pineus Tilu CI/CD Pipeline with Docker
+name: Pineus Tilu CI/CD Pipeline
 
 on:
   push:
@@ -7,81 +7,122 @@ on:
     branches: [ main, develop ]
 
 env:
-  DOCKER_COMPOSE_VERSION: '3.8'
   COMPOSE_PROJECT_NAME: 'pineus-tilu-${{ github.run_id }}'
 
 jobs:
   test-docker:
     name: Test Application with Docker
     runs-on: ubuntu-latest
+    
     services:
-      db:
+      mysql:
         image: mysql:8.0
         env:
           MYSQL_ROOT_PASSWORD: password
           MYSQL_DATABASE: pineus_tilu_test
+          MYSQL_USER: pineus_user
+          MYSQL_PASSWORD: pineus_pass
         ports:
           - 3306:3306
-        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Docker
-        uses: docker/setup-docker-action@v3
+      - name: Create .env.testing file
+        run: |
+          cat > .env.testing << EOF
+          APP_NAME="Pineus Tilu Test"
+          APP_ENV=testing
+          APP_KEY=
+          APP_DEBUG=true
+          APP_URL=http://localhost
+          
+          DB_CONNECTION=mysql
+          DB_HOST=127.0.0.1
+          DB_PORT=3306
+          DB_DATABASE=pineus_tilu_test
+          DB_USERNAME=pineus_user
+          DB_PASSWORD=pineus_pass
+          
+          CACHE_DRIVER=array
+          QUEUE_CONNECTION=sync
+          SESSION_DRIVER=array
+          EOF
 
       - name: Build Docker Images
         run: docker-compose -f docker-compose.ci.yml build
 
-      - name: Start Services
-        run: docker-compose -f docker-compose.ci.yml up -d db app
-      - run: sleep 30 # Wait for DB to be ready
+      - name: Start Application Container
+        run: docker-compose -f docker-compose.ci.yml up -d app
+
+      - name: Wait for MySQL to be ready
+        run: |
+          for i in {1..30}; do
+            if docker-compose -f docker-compose.ci.yml exec -T app mysqladmin ping -h mysql --silent; then
+              echo "MySQL is ready!"
+              break
+            fi
+            echo "Waiting for MySQL... ($i/30)"
+            sleep 2
+          done
 
       - name: Install Composer Dependencies
-        run: |
-          docker-compose run --rm app composer install --prefer-dist --no-interaction --no-progress
+        run: docker-compose -f docker-compose.ci.yml exec -T app composer install --prefer-dist --no-interaction --no-progress --optimize-autoloader
 
-      - name: Copy .env.testing
-        run: docker-compose run --rm app cp .env.testing .env
+      - name: Copy Environment File
+        run: docker-compose -f docker-compose.ci.yml exec -T app cp .env.testing .env
 
       - name: Generate Application Key
-        run: docker-compose run --rm app php artisan key:generate
+        run: docker-compose -f docker-compose.ci.yml exec -T app php artisan key:generate --env=testing
 
       - name: Install NPM Dependencies
-        run: docker-compose run --rm app npm ci
+        run: docker-compose -f docker-compose.ci.yml exec -T app npm ci
 
-      - name: Build Assets
-        run: docker-compose run --rm app npm run build
+      - name: Build Frontend Assets
+        run: docker-compose -f docker-compose.ci.yml exec -T app npm run build
 
       - name: Set Directory Permissions
-        run: docker-compose run --rm app chmod -R 777 storage bootstrap/cache
+        run: docker-compose -f docker-compose.ci.yml exec -T app chmod -R 777 storage bootstrap/cache
 
-      - name: Run Migrations & Seed Test Database
+      - name: Run Database Migrations
+        run: docker-compose -f docker-compose.ci.yml exec -T app php artisan migrate --env=testing --force
+
+      - name: Seed Test Database
+        run: docker-compose -f docker-compose.ci.yml exec -T app php artisan db:seed --class=RoomSeeder --env=testing --force
+
+      - name: Run PHPUnit Tests
+        run: docker-compose -f docker-compose.ci.yml exec -T app php artisan test --env=testing
+
+      - name: Run PHP Security Audit
+        run: docker-compose -f docker-compose.ci.yml exec -T app composer audit || true
+
+      - name: Run NPM Security Audit
+        run: docker-compose -f docker-compose.ci.yml exec -T app npm audit --audit-level=moderate || true
+
+      - name: Cleanup Docker Resources
+        if: always()
         run: |
-          docker-compose run --rm app php artisan migrate --env=testing --force
-          docker-compose run --rm app php artisan db:seed --class=RoomSeeder --env=testing --force
+          docker-compose -f docker-compose.ci.yml down -v
+          docker system prune -f
 
-      - name: Run Tests
-        run: docker-compose run --rm app php artisan test --env=testing
-
-      - name: Security Scan - PHP Dependencies
-        run: docker-compose run --rm app composer audit || true
-
-      - name: Security Scan - NPM Dependencies
-        run: docker-compose run --rm app npm audit --audit-level=moderate || true
-
-  deploy-docker:
-    name: Deploy Docker Stack
+  build-and-push:
+    name: Build and Push Docker Image
     runs-on: ubuntu-latest
     needs: test-docker
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Docker
-        uses: docker/setup-docker-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -89,46 +130,144 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build Production Docker Image
-        run: |
-          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:${{ github.sha }} .
-          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:latest .
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app
+          tags: |
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Push Docker Image
-        run: |
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:${{ github.sha }}
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:latest
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:buildcache,mode=max
 
-      - name: Deploy to Server
-        uses: appleboy/ssh-action@v1
+  deploy-production:
+    name: Deploy to Production Server
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USERNAME }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
           script: |
-            cd /opt/pineus-tilu
+            echo "🚀 Starting deployment..."
+            
+            cd /opt/pineus-tilu || exit 1
+            
+            echo "📥 Pulling latest images..."
             docker-compose pull
+            
+            echo "🔄 Restarting services..."
             docker-compose down
             docker-compose up -d
+            
+            echo "⏳ Waiting for services to start..."
+            sleep 10
+            
+            echo "🗄️ Running database migrations..."
             docker-compose exec -T app php artisan migrate --force
+            
+            echo "⚡ Optimizing application..."
             docker-compose exec -T app php artisan config:cache
             docker-compose exec -T app php artisan route:cache
-            docker image prune -f
+            docker-compose exec -T app php artisan view:cache
+            
+            echo "🧹 Cleaning up old images..."
+            docker image prune -af --filter "until=24h"
+            
+            echo "✅ Deployment completed successfully!"
+            docker-compose ps
 
-  monitoring:
-    name: Monitoring Setup
-    runs-on: ubuntu-latest
-    needs: deploy-docker
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    steps:
-      - name: Setup Monitoring on Server
-        uses: appleboy/ssh-action@v1
+      - name: Verify Deployment
+        uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USERNAME }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
           script: |
             cd /opt/pineus-tilu
-            docker-compose -f docker-compose.monitoring.yml up -d || echo "Monitoring stack started"
-            echo "📊 Monitoring Services:"
-            docker-compose -f docker-compose.monitoring.yml ps
+            
+            echo "🔍 Checking service health..."
+            if docker-compose ps | grep -q "Up"; then
+              echo "✅ Services are running"
+              docker-compose ps
+            else
+              echo "❌ Some services are not running!"
+              docker-compose ps
+              exit 1
+            fi
+
+  setup-monitoring:
+    name: Setup Monitoring Stack
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+      - name: Deploy Monitoring Stack
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          script: |
+            cd /opt/pineus-tilu
+            
+            if [ -f docker-compose.monitoring.yml ]; then
+              echo "📊 Starting monitoring services..."
+              docker-compose -f docker-compose.monitoring.yml up -d
+              
+              echo "⏳ Waiting for monitoring stack..."
+              sleep 5
+              
+              echo "📊 Monitoring Services Status:"
+              docker-compose -f docker-compose.monitoring.yml ps
+              
+              echo "✅ Monitoring setup completed!"
+            else
+              echo "⚠️ Monitoring compose file not found, skipping..."
+            fi
+
+  notify-success:
+    name: Notify Deployment Success
+    runs-on: ubuntu-latest
+    needs: [deploy-production, setup-monitoring]
+    if: success() && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Send Success Notification
+        run: |
+          echo "🎉 Deployment successful for commit ${{ github.sha }}"
+          echo "📦 Branch: ${{ github.ref_name }}"
+          echo "👤 Author: ${{ github.actor }}"
+          echo "🔗 Commit: ${{ github.event.head_commit.message }}"
+
+  notify-failure:
+    name: Notify Deployment Failure
+    runs-on: ubuntu-latest
+    needs: [test-docker, build-and-push, deploy-production]
+    if: failure()
+    
+    steps:
+      - name: Send Failure Notification
+        run: |
+          echo "❌ Deployment failed for commit ${{ github.sha }}"
+          echo "📦 Branch: ${{ github.ref_name }}"
+          echo "👤 Author: ${{ github.actor }}"
+          echo "🔗 Check the Actions tab for details"
