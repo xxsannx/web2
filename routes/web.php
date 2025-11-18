@@ -4,6 +4,7 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\HomeController;
 use App\Http\Controllers\BookingController;
+use App\Http\Controllers\MetricsController;
 
 // Redirect root ke register
 Route::get('/', function () {
@@ -33,5 +34,5 @@ Route::middleware('auth')->group(function () {
 
 
     //metrics endpoint
-    Route::get('/metrics', [App\Http\Controllers\MetricsController::class, 'metrics']);
+    Route::get('/metrics', [MetricsController::class, 'metrics'])->withoutMiddleware(['auth']);
 });
