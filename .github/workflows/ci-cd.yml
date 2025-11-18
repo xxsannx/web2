@@ -68,8 +68,7 @@ jobs:
             php artisan migrate --force
             php artisan db:seed --class=RoomSeeder --force
             php artisan test || echo 'No PHP tests yet'
-        "
-
+        
   security-scan:
     name: Security Scan (Composer / NPM / ZAP)
     runs-on: ubuntu-latest
