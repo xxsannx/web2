@@ -59,7 +59,12 @@ jobs:
         options: --health-cmd="mysqladmin ping -h localhost" --health-interval=10s --health-retries=5
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-docker-action@v3
+      # Gunakan Docker default preinstalled GitHub runner
+      # Jika perlu versi spesifik, uncomment versi berikut
+      # - name: Setup Docker
+      #   uses: docker/setup-docker-action@v3
+      #   with:
+      #     version: "24.0.5"
       - run: docker-compose -f docker-compose.yml build app
       - run: docker-compose run --rm app bash -c "
             cp .env.example .env
@@ -68,22 +73,19 @@ jobs:
             php artisan migrate --force
             php artisan db:seed --class=RoomSeeder --force
             php artisan test || echo 'No PHP tests yet'
-        
+
   security-scan:
     name: Security Scan (Composer / NPM / ZAP)
     runs-on: ubuntu-latest
     needs: docker-test
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-docker-action@v3
-      - name: Composer & NPM Audit
-        run: |
-          docker-compose run --rm app bash -c "
+      # Docker sudah tersedia di runner
+      - run: docker-compose run --rm app bash -c "
             composer audit --format=json || true
             npm audit --audit-level=moderate || true
-          "
-      - name: OWASP ZAP Baseline Scan
-        run: |
+        
+      - run: |
           docker-compose -f docker-compose.yml up -d app db
           sleep 30
           docker run --network pineus-tilu-${{ github.run_id }}_default -i owasp/zap2docker-stable zap-baseline.py \
@@ -96,14 +98,13 @@ jobs:
     if: "github.ref == 'refs/heads/main' && github.event_name == 'push'"
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-docker-action@v3
+      # Docker sudah tersedia di runner
       - name: Login Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Build & Push Docker Images
-        run: |
+      - run: |
           docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:${{ github.sha }} .
           docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:latest .
           docker push ${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:${{ github.sha }}
