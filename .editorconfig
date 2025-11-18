@@ -1,18 +1,107 @@
-root = true
+name: Pineus Tilu CI/CD Pipeline with Testing
 
-[*]
-charset = utf-8
-end_of_line = lf
-indent_size = 4
-indent_style = space
-insert_final_newline = true
-trim_trailing_whitespace = true
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
 
-[*.md]
-trim_trailing_whitespace = false
+jobs:
+  test:
+    name: Test Application with Docker
+    runs-on: ubuntu-latest
 
-[*.{yml,yaml}]
-indent_size = 2
+    services:
+      db:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: password
+          MYSQL_DATABASE: pineus_tilu_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping" 
+          --health-interval=10s 
+          --health-timeout=5s 
+          --health-retries=3
 
-[docker-compose.yml]
-indent_size = 4
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          extensions: mbstring, pdo, pdo_mysql, zip, exif, pcntl, bcmath
+
+      - name: Cache Composer
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+
+      - name: Install PHP Dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Copy Testing Environment
+        run: cp .env.testing .env
+
+      - name: Generate App Key
+        run: php artisan key:generate
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install NPM Dependencies
+        run: npm ci
+
+      - name: Build Assets
+        run: npm run build
+
+      - name: Directory Permissions
+        run: chmod -R 777 storage bootstrap/cache
+
+      - name: Run Database Migrations
+        env:
+          DB_CONNECTION: mysql
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_DATABASE: pineus_tilu_test
+          DB_USERNAME: root
+          DB_PASSWORD: password
+        run: php artisan migrate --force
+
+      - name: Seed Database
+        env:
+          DB_CONNECTION: mysql
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_DATABASE: pineus_tilu_test
+          DB_USERNAME: root
+          DB_PASSWORD: password
+        run: php artisan db:seed --class=RoomSeeder --force
+
+      - name: Run Tests
+        env:
+          DB_CONNECTION: mysql
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_DATABASE: pineus_tilu_test
+          DB_USERNAME: root
+          DB_PASSWORD: password
+        run: php artisan test --parallel
+
+      - name: PHP CS Fixer Check
+        run: |
+          composer require --dev friendsofphp/php-cs-fixer
+          vendor/bin/php-cs-fixer fix --dry-run --diff --verbose || true
+
+      - name: Security Check - PHP
+        run: composer audit || true
+
+      - name: Security Check - NPM
+        run: npm audit --audit-level=moderate || true
