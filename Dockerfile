@@ -1,36 +1,46 @@
+# Base image PHP
 FROM php:8.2-fpm
 
+# Set working directory
 WORKDIR /var/www
 
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    build-essential \
-    libpng-dev \
-    libjpeg62-turbo-dev \
-    libfreetype6-dev \
-    libonig-dev \
-    libzip-dev \
-    zlib1g-dev \
-    locales \
-    zip \
-    jpegoptim optipng pngquant gifsicle \
-    vim \
-    unzip \
     git \
+    unzip \
     curl \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+    libpng-dev \
+    libonig-dev \
+    libxml2-dev \
+    zip \
+    npm \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN docker-php-ext-install pdo_mysql mbstring zip exif pcntl
-RUN docker-php-ext-configure gd --with-freetype --with-jpeg
-RUN docker-php-ext-install gd
+# Install PHP extensions
+RUN docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd
 
-RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+# Copy composer files first (layer caching)
+COPY composer.json composer.lock ./
 
-RUN groupadd -g 1000 www
-RUN useradd -u 1000 -ms /bin/bash -g www www
+# Install Composer
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+RUN composer install --prefer-dist --no-dev --no-scripts --no-progress --no-interaction
 
-COPY --chown=www:www . /var/www
+# Copy Node files (layer caching)
+COPY package.json package-lock.json ./
 
-USER www
+# Install Node dependencies
+RUN npm ci
 
+# Copy the rest of the application
+COPY . .
+
+# Set ownership and permissions
+RUN chown -R www-data:www-data /var/www \
+    && chmod -R 755 /var/www
+
+# Expose port for PHP-FPM
 EXPOSE 9000
+
+# Run PHP-FPM
 CMD ["php-fpm"]
