@@ -68,7 +68,7 @@ jobs:
             php artisan migrate --force
             php artisan db:seed --class=RoomSeeder --force
             php artisan test
-        "
+        
 
   security-scan:
     name: Security Scan (Snyk / OWASP ZAP)
