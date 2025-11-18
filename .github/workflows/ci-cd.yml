@@ -50,7 +50,7 @@ jobs:
           APP_URL=http://localhost
           
           DB_CONNECTION=mysql
-          DB_HOST=127.0.0.1
+          DB_HOST=mysql
           DB_PORT=3306
           DB_DATABASE=pineus_tilu_test
           DB_USERNAME=pineus_user
@@ -64,20 +64,23 @@ jobs:
       - name: Build Docker Images
         run: docker-compose build
 
-      - name: Start Application Container
-        run: docker-compose up -d app
+      - name: Start Services
+        run: docker-compose up -d
 
       - name: Wait for MySQL to be ready
         run: |
           echo "Waiting for MySQL to be ready..."
           for i in {1..30}; do
-            if docker-compose exec -T app mysqladmin ping -h mysql --silent 2>/dev/null; then
+            if docker-compose exec -T app php -r "new PDO('mysql:host=mysql;dbname=pineus_tilu_test', 'pineus_user', 'pineus_pass');" 2>/dev/null; then
               echo "✅ MySQL is ready!"
               break
             fi
             echo "⏳ Waiting for MySQL... ($i/30)"
-            sleep 2
+            sleep 3
           done
+          
+          echo "Testing MySQL connection from host..."
+          mysqladmin ping -h 127.0.0.1 -P 3306 -u pineus_user -ppineus_pass || echo "MySQL service check completed"
 
       - name: Install Composer Dependencies
         run: docker-compose exec -T app composer install --prefer-dist --no-interaction --no-progress --optimize-autoloader
