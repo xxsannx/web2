@@ -34,6 +34,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Install Docker Compose
+        run: |
+          sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          sudo chmod +x /usr/local/bin/docker-compose
+          docker-compose --version
+
       - name: Create .env.testing file
         run: |
           cat > .env.testing << EOF
@@ -56,59 +62,68 @@ jobs:
           EOF
 
       - name: Build Docker Images
-        run: docker-compose -f docker-compose.ci.yml build
+        run: docker-compose build
 
       - name: Start Application Container
-        run: docker-compose -f docker-compose.ci.yml up -d app
+        run: docker-compose up -d app
 
       - name: Wait for MySQL to be ready
         run: |
+          echo "Waiting for MySQL to be ready..."
           for i in {1..30}; do
-            if docker-compose -f docker-compose.ci.yml exec -T app mysqladmin ping -h mysql --silent; then
-              echo "MySQL is ready!"
+            if docker-compose exec -T app mysqladmin ping -h mysql --silent 2>/dev/null; then
+              echo "✅ MySQL is ready!"
               break
             fi
-            echo "Waiting for MySQL... ($i/30)"
+            echo "⏳ Waiting for MySQL... ($i/30)"
             sleep 2
           done
 
       - name: Install Composer Dependencies
-        run: docker-compose -f docker-compose.ci.yml exec -T app composer install --prefer-dist --no-interaction --no-progress --optimize-autoloader
+        run: docker-compose exec -T app composer install --prefer-dist --no-interaction --no-progress --optimize-autoloader
 
       - name: Copy Environment File
-        run: docker-compose -f docker-compose.ci.yml exec -T app cp .env.testing .env
+        run: docker-compose exec -T app cp .env.testing .env
 
       - name: Generate Application Key
-        run: docker-compose -f docker-compose.ci.yml exec -T app php artisan key:generate --env=testing
+        run: docker-compose exec -T app php artisan key:generate --env=testing
 
       - name: Install NPM Dependencies
-        run: docker-compose -f docker-compose.ci.yml exec -T app npm ci
+        run: docker-compose exec -T app npm ci
 
       - name: Build Frontend Assets
-        run: docker-compose -f docker-compose.ci.yml exec -T app npm run build
+        run: docker-compose exec -T app npm run build
 
       - name: Set Directory Permissions
-        run: docker-compose -f docker-compose.ci.yml exec -T app chmod -R 777 storage bootstrap/cache
+        run: docker-compose exec -T app chmod -R 777 storage bootstrap/cache
 
       - name: Run Database Migrations
-        run: docker-compose -f docker-compose.ci.yml exec -T app php artisan migrate --env=testing --force
+        run: docker-compose exec -T app php artisan migrate --env=testing --force
 
       - name: Seed Test Database
-        run: docker-compose -f docker-compose.ci.yml exec -T app php artisan db:seed --class=RoomSeeder --env=testing --force
+        run: docker-compose exec -T app php artisan db:seed --class=RoomSeeder --env=testing --force
 
       - name: Run PHPUnit Tests
-        run: docker-compose -f docker-compose.ci.yml exec -T app php artisan test --env=testing
+        run: docker-compose exec -T app php artisan test --env=testing
 
       - name: Run PHP Security Audit
-        run: docker-compose -f docker-compose.ci.yml exec -T app composer audit || true
+        run: docker-compose exec -T app composer audit || true
 
       - name: Run NPM Security Audit
-        run: docker-compose -f docker-compose.ci.yml exec -T app npm audit --audit-level=moderate || true
+        run: docker-compose exec -T app npm audit --audit-level=moderate || true
+
+      - name: Show Container Logs on Failure
+        if: failure()
+        run: |
+          echo "📋 Showing application logs..."
+          docker-compose logs app
+          echo "📋 Showing MySQL logs..."
+          docker-compose logs mysql
 
       - name: Cleanup Docker Resources
         if: always()
         run: |
-          docker-compose -f docker-compose.ci.yml down -v
+          docker-compose down -v
           docker system prune -f
 
   build-and-push:
