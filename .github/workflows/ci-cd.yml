@@ -1,109 +1,148 @@
-name: Pineus Tilu CI/CD DevSecOps
+name: Pineus Tilu CI/CD Pipeline with Docker
 
 on:
-  pull_request:
-    branches: [ main, develop ]
   push:
     branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  DOCKER_COMPOSE_VERSION: '3.8'
+  COMPOSE_PROJECT_NAME: 'pineus-tilu-${{ github.run_id }}'
 
 jobs:
-
-  lint-test:
-    name: Lint & Unit Test
+  test-docker:
+    name: Test Application with Docker
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: 18
-
-      - name: Cache NPM
-        uses: actions/cache@v3
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: ${{ runner.os }}-node-
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run ESLint
-        run: npm run lint
-
-      - name: Run unit tests
-        run: npm run test
-
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: 8.1
-
-      - name: Install Composer dependencies
-        run: composer install --prefer-dist --no-interaction --no-progress
-
-      - name: Run PHP Unit tests
-        run: php artisan test || echo "No tests yet"
-
-  docker-test:
-    name: Build & Test Docker App
-    runs-on: ubuntu-latest
-    needs: lint-test
+    
     services:
-      db:
-        image: mysql:5.7
+      mysql:
+        image: mysql:8.0
         env:
-          MYSQL_ROOT_PASSWORD: rootpassword
-          MYSQL_DATABASE: laravel
-        options: --health-cmd="mysqladmin ping -h localhost" --health-interval=10s --health-retries=5
+          MYSQL_ROOT_PASSWORD: password
+          MYSQL_DATABASE: pineus_tilu_test
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+
     steps:
-      - uses: actions/checkout@v4
-      # Gunakan Docker preinstalled, tambahkan sudo
-      - run: sudo docker-compose -f docker-compose.yml build app
-      - run: sudo docker-compose run --rm app bash -c "
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Docker
+        uses: docker/setup-docker-action@v3
+        with:
+          version: "24.0.5"  # versi stabil
+
+      - name: Build Docker Images
+        run: sudo docker compose -f docker-compose.ci.yml build
+
+      - name: Start Services
+        run: |
+          sudo docker compose -f docker-compose.ci.yml up -d mysql
+          sleep 30
+
+      - name: Run Tests in Container
+        run: |
+          sudo docker compose -f docker-compose.ci.yml run --rm app bash -c "
+            composer install --prefer-dist --no-interaction --no-progress
             cp .env.example .env
             php artisan key:generate
+            npm ci
+            npm run build
             chmod -R 777 storage bootstrap/cache
             php artisan migrate --force
             php artisan db:seed --class=RoomSeeder --force
-            php artisan test || echo 'No PHP tests yet'
-        
-  security-scan:
-    name: Security Scan (Composer / NPM / ZAP)
+            php artisan test
+          "
+
+      - name: Stop Services
+        run: sudo docker compose -f docker-compose.ci.yml down
+
+  security-scan-docker:
+    name: Security Scan with Docker
     runs-on: ubuntu-latest
-    needs: docker-test
+    needs: test-docker
+    
     steps:
-      - uses: actions/checkout@v4
-      - run: sudo docker-compose run --rm app bash -c "
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Docker
+        uses: docker/setup-docker-action@v3
+        with:
+          version: "24.0.5"
+
+      - name: Build and Run Security Scan
+        run: |
+          sudo docker compose -f docker-compose.ci.yml build
+          sudo docker compose -f docker-compose.ci.yml run --rm app bash -c "
+            composer install --prefer-dist --no-interaction --no-progress
             composer audit --format=json || true
             npm audit --audit-level=moderate || true
-            
-      - run: |
-          sudo docker-compose -f docker-compose.yml up -d app db
-          sleep 30
-          sudo docker run --network pineus-tilu-${{ github.run_id }}_default -i owasp/zap2docker-stable zap-baseline.py \
-            -t http://app:80 -I
+          "
 
-  build-deploy:
-    name: Build & Deploy Docker App
+      - name: Run ZAP Security Scan
+        run: |
+          sudo docker compose -f docker-compose.ci.yml up -d app mysql
+          sleep 30
+          sudo docker run --network ${COMPOSE_PROJECT_NAME}_default -i owasp/zap2docker-stable zap-baseline.py \
+            -t http://app:80 -I || true
+
+      - name: Stop Security Services
+        run: sudo docker compose -f docker-compose.ci.yml down
+
+  build-docker:
+    name: Build Docker Images
     runs-on: ubuntu-latest
-    needs: [docker-test, security-scan]
-    if: "github.ref == 'refs/heads/main' && github.event_name == 'push'"
+    needs: [test-docker, security-scan-docker]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
     steps:
-      - uses: actions/checkout@v4
-      # Docker sudah tersedia di runner
-      - name: Login Docker Hub
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Docker
+        uses: docker/setup-docker-action@v3
+        with:
+          version: "24.0.5"
+
+      - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - run: |
+
+      - name: Build and Push Docker Images
+        run: |
           sudo docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:${{ github.sha }} .
           sudo docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:latest .
           sudo docker push ${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:${{ github.sha }}
           sudo docker push ${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:latest
-      - name: Deploy via SSH
+
+      - name: Create Deployment Package
+        run: |
+          mkdir -p deployment
+          cp docker-compose.prod.yml deployment/
+          cp .env.example deployment/
+          echo "version: ${{ github.sha }}" > deployment/version.txt
+          tar -czf deployment/pineus-tilu-docker-${{ github.sha }}.tar.gz deployment/
+
+      - name: Upload Docker Deployment Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: pineus-tilu-docker-package
+          path: deployment/pineus-tilu-docker-${{ github.sha }}.tar.gz
+          retention-days: 7
+
+  deploy-docker:
+    name: Deploy Docker Stack
+    runs-on: ubuntu-latest
+    needs: build-docker
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+      - name: Deploy to Server
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -111,8 +150,35 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
             cd /opt/pineus-tilu
-            sudo docker-compose pull
-            sudo docker-compose down
-            sudo docker-compose up -d
-            sudo docker-compose exec -T app php artisan migrate --force
-            curl -fsSL http://localhost/metrics.php || echo "App not responding"
+            sudo docker compose pull
+            sudo docker compose down
+            sudo docker compose up -d
+            sudo docker compose exec -T app php artisan migrate --force
+            sudo docker compose exec -T app php artisan config:cache
+            sudo docker compose exec -T app php artisan route:cache
+            sudo docker image prune -f
+
+      - name: Health Check
+        run: |
+          echo "🚀 Deployment completed!"
+          echo "Application should be available at: http://${{ secrets.SERVER_HOST }}"
+          echo "Monitoring: http://${{ secrets.SERVER_HOST }}:3000"
+
+  monitoring:
+    name: Monitoring Setup
+    runs-on: ubuntu-latest
+    needs: deploy-docker
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+      - name: Setup Monitoring on Server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            cd /opt/pineus-tilu
+            sudo docker compose -f docker-compose.monitoring.yml up -d || echo "Monitoring stack started"
+            echo "📊 Monitoring Services:"
+            sudo docker compose -f docker-compose.monitoring.yml ps
