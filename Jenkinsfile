@@ -1,15 +1,10 @@
 pipeline {
     agent any
 
-    environment {
-        PATH = "/usr/bin:/usr/local/bin:$PATH"
-    }
-
     stages {
 
         stage('Checkout') {
             steps {
-                echo '🔍 Checkout repository...'
                 checkout scm
             }
         }
@@ -17,9 +12,7 @@ pipeline {
         stage('Install & Build') {
             steps {
                 nodejs(nodeJSInstallationName: 'Node 25.0') {
-                    echo '📦 Installing dependencies...'
                     sh 'npm install'
-                    echo '🏗 Building application...'
                     sh 'npm run build'
                 }
             }
@@ -28,7 +21,6 @@ pipeline {
         stage('Run Tests') {
             steps {
                 nodejs(nodeJSInstallationName: 'Node 25.0') {
-                    echo '🧪 Running tests...'
                     sh 'npm test'
                 }
             }
@@ -37,7 +29,6 @@ pipeline {
         stage('Security Scan') {
             steps {
                 nodejs(nodeJSInstallationName: 'Node 25.0') {
-                    echo '🔒 Running npm audit & ESLint security scan'
                     sh 'npm audit --audit-level=high'
                     sh 'npx eslint . --ext .js,.ts'
                 }
@@ -47,12 +38,10 @@ pipeline {
         stage('Package') {
             steps {
                 nodejs(nodeJSInstallationName: 'Node 25.0') {
-                    echo '📦 Packaging application...'
                     sh 'tar -czf app.tar.gz ./dist'
                 }
             }
         }
-
     }
 
     post {
