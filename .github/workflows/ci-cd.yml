@@ -12,9 +12,8 @@ env:
 jobs:
   test-docker:
     name: Test Application with Docker
-    runs-on: self-hosted
-    if: github.ref != 'refs/heads/main'
-
+    runs-on: ubuntu-latest
+    
     services:
       db:
         image: mysql:5.7
@@ -23,15 +22,22 @@ jobs:
           MYSQL_ROOT_PASSWORD: rootpassword
           MYSQL_USER: laraveluser
           MYSQL_PASSWORD: rootpassword
+        ports:
+          - 3306:3306
         options: >-
           --health-cmd="mysqladmin ping -h localhost"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=5
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Install Docker Compose
+        run: |
+          sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          sudo chmod +x /usr/local/bin/docker-compose
+          sudo docker-compose --version
 
       - name: Create .env.testing file
         run: |
@@ -53,61 +59,74 @@ jobs:
           EOF
 
       - name: Build Docker Images
-        run: docker-compose build
+        run: sudo docker-compose build
 
       - name: Start Services
-        run: docker-compose up -d
+        run: sudo docker-compose up -d
 
       - name: Wait for MySQL to be ready
         run: |
           echo "Waiting for MySQL..."
           for i in {1..30}; do
-            if docker-compose exec -T app php -r "new PDO('mysql:host=db;dbname=laravel', 'laraveluser', 'rootpassword');" 2>/dev/null; then
+            if sudo docker-compose exec -T app php -r "new PDO('mysql:host=db;dbname=laravel', 'laraveluser', 'rootpassword');" 2>/dev/null; then
               echo "✅ MySQL ready"
               break
             fi
+            echo "⏳ Waiting... ($i/30)"
             sleep 3
           done
 
       - name: Install Composer Dependencies
-        run: docker-compose exec -T app composer install --prefer-dist --no-interaction --optimize-autoloader
+        run: sudo docker-compose exec -T app composer install --prefer-dist --no-interaction --no-progress --optimize-autoloader
 
       - name: Copy Environment File
-        run: docker-compose exec -T app cp .env.testing .env
+        run: sudo docker-compose exec -T app cp .env.testing .env
 
       - name: Generate Application Key
-        run: docker-compose exec -T app php artisan key:generate --env=testing
+        run: sudo docker-compose exec -T app php artisan key:generate --env=testing
 
       - name: Install NPM Dependencies
-        run: docker-compose exec -T app npm ci
+        run: sudo docker-compose exec -T app npm ci
 
       - name: Build Frontend Assets
-        run: docker-compose exec -T app npm run build
+        run: sudo docker-compose exec -T app npm run build
 
       - name: Set Directory Permissions
-        run: docker-compose exec -T app chmod -R 777 storage bootstrap/cache
+        run: sudo docker-compose exec -T app chmod -R 777 storage bootstrap/cache
 
       - name: Run Database Migrations
-        run: docker-compose exec -T app php artisan migrate --env=testing --force
+        run: sudo docker-compose exec -T app php artisan migrate --env=testing --force
 
       - name: Seed Test Database
-        run: docker-compose exec -T app php artisan db:seed --class=RoomSeeder --env=testing --force
+        run: sudo docker-compose exec -T app php artisan db:seed --class=RoomSeeder --env=testing --force
 
       - name: Run PHPUnit Tests
-        run: docker-compose exec -T app php artisan test --env=testing
+        run: sudo docker-compose exec -T app php artisan test --env=testing
+
+      - name: Run PHP Security Audit
+        run: sudo docker-compose exec -T app composer audit || true
+
+      - name: Run NPM Security Audit
+        run: sudo docker-compose exec -T app npm audit --audit-level=moderate || true
+
+      - name: Show Container Logs on Failure
+        if: failure()
+        run: |
+          sudo docker-compose logs app
+          sudo docker-compose logs db
 
       - name: Cleanup Docker Resources
         if: always()
         run: |
-          docker-compose down -v
-          docker system prune -f
+          sudo docker-compose down -v
+          sudo docker system prune -f
 
   build-and-push:
     name: Build and Push Docker Image
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     needs: test-docker
-    if: github.ref == 'refs/heads/main'
-
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -121,52 +140,92 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app
+          tags: |
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
       - name: Build and Push Docker Image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:buildcache,mode=max
 
   deploy-production:
-    name: Deploy to Production Server
-    runs-on: self-hosted
+    name: Deploy to Local Server
+    runs-on: ubuntu-latest
     needs: build-and-push
-    if: github.ref == 'refs/heads/main'
-
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
     steps:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.0
         with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USERNAME }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
+          host: ${{ secrets.SERVER_HOST }}  # 192.168.1.6
+          username: ${{ secrets.SERVER_USERNAME }}  # ihsan
+          key: ${{ secrets.SERVER_SSH_KEY }}  # deploy_key
           port: ${{ secrets.SERVER_SSH_PORT || 22 }}
           script: |
             echo "🚀 Starting deployment..."
-
+            
             cd /opt/pineus-tilu || exit 1
-
+            
             echo "📥 Pulling latest images..."
             sudo docker-compose pull
-
+            
             echo "🔄 Restarting services..."
             sudo docker-compose down
             sudo docker-compose up -d
-
+            
             echo "⏳ Waiting for services to start..."
             sleep 10
-
+            
             echo "🗄️ Running database migrations..."
             sudo docker-compose exec -T app php artisan migrate --force
-
+            
             echo "⚡ Optimizing application..."
             sudo docker-compose exec -T app php artisan config:cache
             sudo docker-compose exec -T app php artisan route:cache
             sudo docker-compose exec -T app php artisan view:cache
-
+            
             echo "🧹 Cleaning up old images..."
             sudo docker image prune -af --filter "until=24h"
-
+            
             echo "✅ Deployment completed successfully!"
             sudo docker-compose ps
+
+  notify-success:
+    name: Notify Deployment Success
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    if: success() && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Send Success Notification
+        run: |
+          echo "🎉 Deployment successful for commit ${{ github.sha }}"
+          echo "📦 Branch: ${{ github.ref_name }}"
+          echo "👤 Author: ${{ github.actor }}"
+          echo "🔗 Commit: ${{ github.event.head_commit.message }}"
+
+  notify-failure:
+    name: Notify Deployment Failure
+    runs-on: ubuntu-latest
+    needs: [test-docker, build-and-push, deploy-production]
+    if: failure()
+    
+    steps:
+      - name: Send Failure Notification
+        run: |
+          echo "❌ Deployment failed for commit ${{ github.sha }}"
+          echo "📦 Branch: ${{ github.ref_name }}"
+          echo "👤 Author: ${{ github.actor }}"
+          echo "🔗 Check the Actions tab for details"
