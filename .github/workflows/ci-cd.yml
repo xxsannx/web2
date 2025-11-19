@@ -15,13 +15,14 @@ jobs:
     runs-on: ubuntu-latest
     
     services:
-      mysql:
-        image: mysql:8.0
+      db:
+        image: mysql:5.7
+        container_name: db
         env:
-          MYSQL_ROOT_PASSWORD: password
-          MYSQL_DATABASE: pineus_tilu_test
-          MYSQL_USER: pineus_user
-          MYSQL_PASSWORD: pineus_pass
+          MYSQL_DATABASE: laravel
+          MYSQL_ROOT_PASSWORD: rootpassword
+          MYSQL_USER: laraveluser
+          MYSQL_PASSWORD: rootpassword
         ports:
           - 3306:3306
         options: >-
@@ -48,14 +49,14 @@ jobs:
           APP_KEY=
           APP_DEBUG=true
           APP_URL=http://localhost
-          
+
           DB_CONNECTION=mysql
-          DB_HOST=mysql
+          DB_HOST=db
           DB_PORT=3306
-          DB_DATABASE=pineus_tilu_test
-          DB_USERNAME=pineus_user
-          DB_PASSWORD=pineus_pass
-          
+          DB_DATABASE=laravel
+          DB_USERNAME=laraveluser
+          DB_PASSWORD=rootpassword
+
           CACHE_DRIVER=array
           QUEUE_CONNECTION=sync
           SESSION_DRIVER=array
@@ -69,18 +70,15 @@ jobs:
 
       - name: Wait for MySQL to be ready
         run: |
-          echo "Waiting for MySQL to be ready..."
-          for i in {1..30}; do
-            if sudo docker-compose exec -T app php -r "new PDO('mysql:host=mysql;dbname=pineus_tilu_test', 'pineus_user', 'pineus_pass');" 2>/dev/null; then
+          echo "⏳ Waiting for MySQL service..."
+          for i in {1..10}; do
+            if sudo docker-compose exec -T app php -r "new PDO('mysql:host=db;dbname=laravel','laraveluser','rootpassword');" 2>/dev/null; then
               echo "✅ MySQL is ready!"
               break
             fi
-            echo "⏳ Waiting for MySQL... ($i/30)"
+            echo "⏳ Waiting for MySQL... ($i/10)"
             sleep 3
           done
-          
-          echo "Testing MySQL connection from host..."
-          mysqladmin ping -h 127.0.0.1 -P 3306 -u pineus_user -ppineus_pass || echo "MySQL service check completed"
 
       - name: Install Composer Dependencies
         run: sudo docker-compose exec -T app composer install --prefer-dist --no-interaction --no-progress --optimize-autoloader
@@ -121,171 +119,10 @@ jobs:
           echo "📋 Showing application logs..."
           sudo docker-compose logs app
           echo "📋 Showing MySQL logs..."
-          sudo docker-compose logs mysql
+          sudo docker-compose logs db
 
       - name: Cleanup Docker Resources
         if: always()
         run: |
           sudo docker-compose down -v
           sudo docker system prune -f
-
-  build-and-push:
-    name: Build and Push Docker Image
-    runs-on: ubuntu-latest
-    needs: test-docker
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Extract metadata for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app
-          tags: |
-            type=sha,prefix={{branch}}-
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build and Push Docker Image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:buildcache
-          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:buildcache,mode=max
-
-  deploy-production:
-    name: Deploy to Production Server
-    runs-on: ubuntu-latest
-    needs: build-and-push
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    
-    steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.0
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USERNAME }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_PORT || 22 }}
-          script: |
-            echo "🚀 Starting deployment..."
-            
-            cd /opt/pineus-tilu || exit 1
-            
-            echo "📥 Pulling latest images..."
-            sudo docker-compose pull
-            
-            echo "🔄 Restarting services..."
-            sudo docker-compose down
-            sudo docker-compose up -d
-            
-            echo "⏳ Waiting for services to start..."
-            sleep 10
-            
-            echo "🗄️ Running database migrations..."
-            sudo docker-compose exec -T app php artisan migrate --force
-            
-            echo "⚡ Optimizing application..."
-            sudo docker-compose exec -T app php artisan config:cache
-            sudo docker-compose exec -T app php artisan route:cache
-            sudo docker-compose exec -T app php artisan view:cache
-            
-            echo "🧹 Cleaning up old images..."
-            sudo docker image prune -af --filter "until=24h"
-            
-            echo "✅ Deployment completed successfully!"
-            sudo docker-compose ps
-
-      - name: Verify Deployment
-        uses: appleboy/ssh-action@v1.0.0
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USERNAME }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_PORT || 22 }}
-          script: |
-            cd /opt/pineus-tilu
-            
-            echo "🔍 Checking service health..."
-            if sudo docker-compose ps | grep -q "Up"; then
-              echo "✅ Services are running"
-              sudo docker-compose ps
-            else
-              echo "❌ Some services are not running!"
-              sudo docker-compose ps
-              exit 1
-            fi
-
-  setup-monitoring:
-    name: Setup Monitoring Stack
-    runs-on: ubuntu-latest
-    needs: deploy-production
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    
-    steps:
-      - name: Deploy Monitoring Stack
-        uses: appleboy/ssh-action@v1.0.0
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USERNAME }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_PORT || 22 }}
-          script: |
-            cd /opt/pineus-tilu
-            
-            if [ -f docker-compose.monitoring.yml ]; then
-              echo "📊 Starting monitoring services..."
-              sudo docker-compose -f docker-compose.monitoring.yml up -d
-              
-              echo "⏳ Waiting for monitoring stack..."
-              sleep 5
-              
-              echo "📊 Monitoring Services Status:"
-              sudo docker-compose -f docker-compose.monitoring.yml ps
-              
-              echo "✅ Monitoring setup completed!"
-            else
-              echo "⚠️ Monitoring compose file not found, skipping..."
-            fi
-
-  notify-success:
-    name: Notify Deployment Success
-    runs-on: ubuntu-latest
-    needs: [deploy-production, setup-monitoring]
-    if: success() && github.ref == 'refs/heads/main'
-    
-    steps:
-      - name: Send Success Notification
-        run: |
-          echo "🎉 Deployment successful for commit ${{ github.sha }}"
-          echo "📦 Branch: ${{ github.ref_name }}"
-          echo "👤 Author: ${{ github.actor }}"
-          echo "🔗 Commit: ${{ github.event.head_commit.message }}"
-
-  notify-failure:
-    name: Notify Deployment Failure
-    runs-on: ubuntu-latest
-    needs: [test-docker, build-and-push, deploy-production]
-    if: failure()
-    
-    steps:
-      - name: Send Failure Notification
-        run: |
-          echo "❌ Deployment failed for commit ${{ github.sha }}"
-          echo "📦 Branch: ${{ github.ref_name }}"
-          echo "👤 Author: ${{ github.actor }}"
-          echo "🔗 Check the Actions tab for details"
