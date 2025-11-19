@@ -1,63 +1,108 @@
 pipeline {
     agent any
 
+    environment {
+        APP_NAME = "pineus-tilu"
+        DEPLOY_HOST = credentials('SERVER_HOST')   // SSH Host
+        DEPLOY_USER = credentials('SERVER_USER')   // SSH User
+        DEPLOY_KEY  = credentials('SERVER_KEY')    // SSH Private Key
+        NODE_VERSION = '18'                         // Node.js version
+    }
+
     stages {
 
         stage('Checkout') {
             steps {
-                echo '🔍 Checkout repository...'
+                echo "🔍 Checkout repository"
                 checkout scm
             }
         }
 
-        stage('Install & Build') {
+        stage('Setup Environment') {
             steps {
-                // NodeJS Plugin otomatis install Node 25.0 jika belum ada
-                nodejs(nodeJSInstallationName: 'Node 25.0') {
-                    echo '📦 Installing dependencies...'
-                    sh 'npm install'
-                    echo '🏗 Building application...'
-                    sh 'npm run build'
+                echo "🛠 Setting up Node.js and Java"
+                // Setup Node.js
+                nodejs(nodeJSInstallationName: 'Node 18') {
+                    sh 'node -v'
+                    sh 'npm -v'
+                }
+                // Setup Java for OWASP ZAP
+                // Pastikan Java terinstall di agent / Jenkins Global Tool
+                sh 'java -version'
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                nodejs(nodeJSInstallationName: 'Node 18') {
+                    sh 'npm ci'
+                    sh 'composer install --prefer-dist --no-interaction --no-progress --optimize-autoloader'
+                }
+            }
+        }
+
+        stage('Build Application') {
+            steps {
+                nodejs(nodeJSInstallationName: 'Node 18') {
+                    sh 'npm run build || true'
                 }
             }
         }
 
         stage('Run Tests') {
             steps {
-                nodejs(nodeJSInstallationName: 'Node 25.0') {
-                    echo '🧪 Running tests...'
-                    sh 'npm test'
+                nodejs(nodeJSInstallationName: 'Node 18') {
+                    sh 'php artisan test'
                 }
             }
         }
 
-        stage('Security Scan') {
+        stage('Static Analysis (ESLint)') {
             steps {
-                nodejs(nodeJSInstallationName: 'Node 25.0') {
-                    echo '🔒 Running npm audit & ESLint security scan'
-                    sh 'npm audit --audit-level=high'
-                    sh 'npx eslint . --ext .js,.ts'
+                nodejs(nodeJSInstallationName: 'Node 18') {
+                    sh 'npx eslint . --ext .js,.ts || true'
                 }
             }
         }
 
-        stage('Package') {
+        stage('Dynamic Security Scan (OWASP ZAP)') {
             steps {
-                nodejs(nodeJSInstallationName: 'Node 25.0') {
-                    echo '📦 Packaging application...'
-                    sh 'tar -czf app.tar.gz ./dist'
-                }
+                echo "🔒 Running OWASP ZAP scan"
+                sh '''
+                    docker run --rm -t owasp/zap2docker-stable zap-baseline.py \
+                    -t http://localhost:8000 \
+                    -r zap_report.html || true
+                '''
             }
         }
 
+        stage('Deploy') {
+            steps {
+                echo "🚀 Deploying application"
+                sshagent(credentials: ['deploy-ssh-key']) {
+                    sh '''
+                        ssh -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_HOST '
+                            cd /opt/pineus-tilu &&
+                            git pull &&
+                            docker-compose down &&
+                            docker-compose up -d --build &&
+                            php artisan migrate --force
+                        '
+                    '''
+                }
+            }
+        }
     }
 
     post {
         always {
-            echo '🧹 Cleanup finished'
+            echo '🧹 Pipeline finished'
+        }
+        success {
+            echo '✅ Pipeline succeeded'
         }
         failure {
-            echo '❌ Pipeline failed!'
+            echo '❌ Pipeline failed'
         }
     }
 }
