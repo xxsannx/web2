@@ -12,8 +12,8 @@ env:
 jobs:
   test-docker:
     name: Test Application with Docker
-    runs-on: self-hosted
-    
+    runs-on: ubuntu-latest
+
     services:
       db:
         image: mysql:5.7

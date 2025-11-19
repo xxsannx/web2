@@ -4,7 +4,7 @@ pipeline {
     environment {
         // Ensure ZAP_HOME is set to the correct ZAP installation directory
         ZAP_HOME = '/opt/zap'  // Update the path if necessary
-        TARGET_URL = "http://127.0.0.1:8000"  // Update with the target URL of your Laravel application
+        TARGET_URL = "http://webserver:80"  // Update with the target URL of your Laravel application
         BUILD_ARTIFACT = "build-${BUILD_NUMBER}.tar.gz"
         
         // ZAP Report Directory

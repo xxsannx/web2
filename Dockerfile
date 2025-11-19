@@ -14,23 +14,33 @@ RUN apt-get update && apt-get install -y \
     libxml2-dev \
     zip \
     npm \
+    openjdk-11-jdk \
+    wget \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Install PHP extensions
 RUN docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd
 
-# Copy composer files first (layer caching)
-COPY composer.json composer.lock ./
-
 # Install Composer
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+# Copy composer files first (for caching)
+COPY composer.json composer.lock ./
 RUN composer install --prefer-dist --no-dev --no-scripts --no-progress --no-interaction
 
-# Copy Node files (layer caching)
+# Copy Node files and install dependencies
 COPY package.json package-lock.json ./
-
-# Install Node dependencies
 RUN npm ci
+
+# Install ESLint globally
+RUN npm install -g eslint
+
+# Install OWASP ZAP (Headless / Daemon mode)
+RUN wget https://github.com/zaproxy/zaproxy/releases/download/v2.15.0/ZAP_2_15_0_Linux.tar.gz \
+    && tar -xvzf ZAP_2_15_0_Linux.tar.gz -C /opt/ \
+    && rm ZAP_2_15_0_Linux.tar.gz
+ENV PATH="/opt/ZAP_2_15_0:$PATH"
 
 # Copy the rest of the application
 COPY . .
@@ -39,8 +49,8 @@ COPY . .
 RUN chown -R www-data:www-data /var/www \
     && chmod -R 755 /var/www
 
-# Expose port for PHP-FPM
+# Expose PHP-FPM port
 EXPOSE 9000
 
-# Run PHP-FPM
+# Start PHP-FPM
 CMD ["php-fpm"]
