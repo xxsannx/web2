@@ -1,175 +1,12 @@
-name: Pineus Tilu CI/CD Pipeline
+name: Deploy Production Check
 
 on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main, develop ]
-
-env:
-  COMPOSE_PROJECT_NAME: 'pineus-tilu-${{ github.run_id }}'
+  workflow_dispatch: # Bisa dijalankan manual untuk testing
 
 jobs:
-  test-docker:
-    name: Test Application with Docker
-    runs-on: ubuntu-latest
-    
-    services:
-      db:
-        image: mysql:5.7
-        env:
-          MYSQL_DATABASE: laravel
-          MYSQL_ROOT_PASSWORD: rootpassword
-          MYSQL_USER: laraveluser
-          MYSQL_PASSWORD: rootpassword
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping -h localhost"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=5
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Docker Compose
-        run: |
-          sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-          sudo chmod +x /usr/local/bin/docker-compose
-          sudo docker-compose --version
-
-      - name: Create .env.testing file
-        run: |
-          cat > .env.testing << EOF
-          APP_NAME="Pineus Tilu Test"
-          APP_ENV=testing
-          APP_KEY=
-          APP_DEBUG=true
-          APP_URL=http://localhost
-
-          DB_CONNECTION=mysql
-          DB_HOST=db
-          DB_PORT=3306
-          DB_DATABASE=laravel
-          DB_USERNAME=laraveluser
-          DB_PASSWORD=rootpassword
-
-          CACHE_DRIVER=array
-          QUEUE_CONNECTION=sync
-          SESSION_DRIVER=array
-          EOF
-
-      - name: Build Docker Images
-        run: sudo docker-compose build
-
-      - name: Start Services
-        run: sudo docker-compose up -d
-
-      - name: Wait for MySQL to be ready
-        run: |
-          echo "Waiting for MySQL to be ready..."
-          for i in {1..30}; do
-            if sudo docker-compose exec -T app php -r "new PDO('mysql:host=db;dbname=laravel', 'laraveluser', 'rootpassword');" 2>/dev/null; then
-              echo "✅ MySQL is ready!"
-              break
-            fi
-            echo "⏳ Waiting for MySQL... ($i/30)"
-            sleep 3
-          done
-
-      - name: Install Composer Dependencies
-        run: sudo docker-compose exec -T app composer install --prefer-dist --no-interaction --no-progress --optimize-autoloader
-
-      - name: Copy Environment File
-        run: sudo docker-compose exec -T app cp .env.testing .env
-
-      - name: Generate Application Key
-        run: sudo docker-compose exec -T app php artisan key:generate --env=testing
-
-      - name: Install NPM Dependencies
-        run: sudo docker-compose exec -T app npm ci
-
-      - name: Build Frontend Assets
-        run: sudo docker-compose exec -T app npm run build
-
-      - name: Set Directory Permissions
-        run: sudo docker-compose exec -T app chmod -R 777 storage bootstrap/cache
-
-      - name: Run Database Migrations
-        run: sudo docker-compose exec -T app php artisan migrate --env=testing --force
-
-      - name: Seed Test Database
-        run: sudo docker-compose exec -T app php artisan db:seed --class=RoomSeeder --env=testing --force
-
-      - name: Run PHPUnit Tests
-        run: sudo docker-compose exec -T app php artisan test --env=testing
-
-      - name: Run PHP Security Audit
-        run: sudo docker-compose exec -T app composer audit || true
-
-      - name: Run NPM Security Audit
-        run: sudo docker-compose exec -T app npm audit --audit-level=moderate || true
-
-      - name: Show Container Logs on Failure
-        if: failure()
-        run: |
-          echo "📋 Showing application logs..."
-          sudo docker-compose logs app
-          echo "📋 Showing MySQL logs..."
-          sudo docker-compose logs db
-
-      - name: Cleanup Docker Resources
-        if: always()
-        run: |
-          sudo docker-compose down -v
-          sudo docker system prune -f
-
-  build-and-push:
-    name: Build and Push Docker Image
-    runs-on: ubuntu-latest
-    needs: test-docker
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Extract metadata for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app
-          tags: |
-            type=sha,prefix={{branch}}-
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build and Push Docker Image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:buildcache
-          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/pineus-tilu-app:buildcache,mode=max
-
   deploy-production:
-    name: Deploy to Production Server
     runs-on: ubuntu-latest
-    needs: build-and-push
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    
+
     steps:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.0
@@ -179,58 +16,24 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT || 22 }}
           script: |
-            echo "🚀 Starting deployment..."
-            
             cd /opt/pineus-tilu || exit 1
             
-            echo "📥 Pulling latest images..."
-            sudo docker-compose pull
+            echo "📥 Pull latest code..."
+            git pull origin main
             
-            echo "🔄 Restarting services..."
-            sudo docker-compose down
-            sudo docker-compose up -d
+            echo "🔄 Start services..."
+            sudo docker-compose up -d --build
             
-            echo "⏳ Waiting for services to start..."
+            echo "⏳ Waiting for services..."
             sleep 10
             
-            echo "🗄️ Running database migrations..."
+            echo "🗄️ Run migrations..."
             sudo docker-compose exec -T app php artisan migrate --force
             
-            echo "⚡ Optimizing application..."
+            echo "⚡ Clear caches..."
             sudo docker-compose exec -T app php artisan config:cache
             sudo docker-compose exec -T app php artisan route:cache
             sudo docker-compose exec -T app php artisan view:cache
             
-            echo "🧹 Cleaning up old images..."
-            sudo docker image prune -af --filter "until=24h"
-            
-            echo "✅ Deployment completed successfully!"
+            echo "🔍 Check container status..."
             sudo docker-compose ps
-
-  notify-success:
-    name: Notify Deployment Success
-    runs-on: ubuntu-latest
-    needs: deploy-production
-    if: success() && github.ref == 'refs/heads/main'
-    
-    steps:
-      - name: Send Success Notification
-        run: |
-          echo "🎉 Deployment successful for commit ${{ github.sha }}"
-          echo "📦 Branch: ${{ github.ref_name }}"
-          echo "👤 Author: ${{ github.actor }}"
-          echo "🔗 Commit: ${{ github.event.head_commit.message }}"
-
-  notify-failure:
-    name: Notify Deployment Failure
-    runs-on: ubuntu-latest
-    needs: [test-docker, build-and-push, deploy-production]
-    if: failure()
-    
-    steps:
-      - name: Send Failure Notification
-        run: |
-          echo "❌ Deployment failed for commit ${{ github.sha }}"
-          echo "📦 Branch: ${{ github.ref_name }}"
-          echo "👤 Author: ${{ github.actor }}"
-          echo "🔗 Check the Actions tab for details"
