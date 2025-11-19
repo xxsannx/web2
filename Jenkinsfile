@@ -1,6 +1,10 @@
 pipeline {
     agent any
 
+    environment {
+        PATH = "/usr/bin:/usr/local/bin:$PATH"
+    }
+
     stages {
 
         stage('Checkout') {
@@ -10,38 +14,42 @@ pipeline {
             }
         }
 
-        stage('Use Node 25') {
+        stage('Install & Build') {
             steps {
-                // Pakai NodeJS Plugin
                 nodejs(nodeJSInstallationName: 'Node 25.0') {
-                    
-                    stage('Install Dependencies') {
-                        echo '📦 Installing dependencies...'
-                        sh 'npm install'
-                    }
+                    echo '📦 Installing dependencies...'
+                    sh 'npm install'
+                    echo '🏗 Building application...'
+                    sh 'npm run build'
+                }
+            }
+        }
 
-                    stage('Build Application') {
-                        echo '🏗 Building application...'
-                        sh 'npm run build'
-                    }
+        stage('Run Tests') {
+            steps {
+                nodejs(nodeJSInstallationName: 'Node 25.0') {
+                    echo '🧪 Running tests...'
+                    sh 'npm test'
+                }
+            }
+        }
 
-                    stage('Run Tests') {
-                        echo '🧪 Running tests...'
-                        sh 'npm test'
-                    }
+        stage('Security Scan') {
+            steps {
+                nodejs(nodeJSInstallationName: 'Node 25.0') {
+                    echo '🔒 Running npm audit & ESLint security scan'
+                    sh 'npm audit --audit-level=high'
+                    sh 'npx eslint . --ext .js,.ts'
+                }
+            }
+        }
 
-                    stage('Security Scan') {
-                        echo '🔒 Running npm audit & ESLint security scan'
-                        sh 'npm audit --audit-level=high'
-                        sh 'npx eslint . --ext .js,.ts'
-                    }
-
-                    stage('Package') {
-                        echo '📦 Packaging application...'
-                        sh 'tar -czf app.tar.gz ./dist'
-                    }
-
-                } // end nodejs
+        stage('Package') {
+            steps {
+                nodejs(nodeJSInstallationName: 'Node 25.0') {
+                    echo '📦 Packaging application...'
+                    sh 'tar -czf app.tar.gz ./dist'
+                }
             }
         }
 
