@@ -1,39 +1,39 @@
-name: Deploy Production Check
+name: Deploy Production Test
 
 on:
-  workflow_dispatch: # Bisa dijalankan manual untuk testing
+  push:
+    branches: [ main ]
 
 jobs:
-  deploy-production:
+  deploy-test:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.0
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        uses: webfactory/ssh-agent@v0.8.1
         with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USERNAME }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_PORT || 22 }}
-          script: |
+          ssh-private-key: ${{ secrets.SERVER_SSH_KEY }}
+
+      - name: Test SSH connection
+        run: |
+          ssh -o StrictHostKeyChecking=no ihsan@10.60.116.14 "echo '✅ SSH connection successful!'"
+
+      - name: Deploy application (dry run)
+        run: |
+          ssh -o StrictHostKeyChecking=no ihsan@10.60.116.14 << 'EOF'
+            echo "🚀 Starting test deployment..."
+            
+            # Masuk ke folder aplikasi
             cd /opt/pineus-tilu || exit 1
             
-            echo "📥 Pull latest code..."
-            git pull origin main
+            # Tarik update image (jika menggunakan Docker)
+            sudo docker-compose pull
             
-            echo "🔄 Start services..."
-            sudo docker-compose up -d --build
+            # Hanya test restart service
+            sudo docker-compose up -d --no-deps app
             
-            echo "⏳ Waiting for services..."
-            sleep 10
-            
-            echo "🗄️ Run migrations..."
-            sudo docker-compose exec -T app php artisan migrate --force
-            
-            echo "⚡ Clear caches..."
-            sudo docker-compose exec -T app php artisan config:cache
-            sudo docker-compose exec -T app php artisan route:cache
-            sudo docker-compose exec -T app php artisan view:cache
-            
-            echo "🔍 Check container status..."
-            sudo docker-compose ps
+            echo "✅ Test deployment finished!"
+          EOF
